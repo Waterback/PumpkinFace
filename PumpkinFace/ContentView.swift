@@ -42,7 +42,8 @@ class CameraViewModel: NSObject, ObservableObject {
     private func configureSession() {
         session.beginConfiguration()
         
-        guard let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front),
+        // Ändere die Kamera auf die Rückseitenkamera
+        guard let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
               let videoDeviceInput = try? AVCaptureDeviceInput(device: videoDevice),
               session.canAddInput(videoDeviceInput) else { return }
         
@@ -92,7 +93,10 @@ extension CameraViewModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return }
         let uiImage = UIImage(cgImage: cgImage)
 
-        // Calculate the face frame
+        // Bildrotation korrigieren
+        let rotatedImage = UIImage(cgImage: cgImage, scale: uiImage.scale, orientation: .right)
+
+        // Berechne das Gesichtsfeld
         let boundingBox = faceObservation.boundingBox
         let faceRect = CGRect(
             x: boundingBox.origin.x * CGFloat(cgImage.width),
@@ -101,9 +105,9 @@ extension CameraViewModel: AVCaptureVideoDataOutputSampleBufferDelegate {
             height: boundingBox.height * CGFloat(cgImage.height)
         )
 
-        // Draw pumpkin over the face
-        UIGraphicsBeginImageContextWithOptions(uiImage.size, false, 1.0)
-        uiImage.draw(in: CGRect(x: 0, y: 0, width: uiImage.size.width, height: uiImage.size.height))
+        // Kürbis auf das Gesicht legen
+        UIGraphicsBeginImageContextWithOptions(rotatedImage.size, false, 1.0)
+        rotatedImage.draw(in: CGRect(x: 0, y: 0, width: rotatedImage.size.width, height: rotatedImage.size.height))
         pumpkinImage.draw(in: faceRect)
 
         let finalImage = UIGraphicsGetImageFromCurrentImageContext()
