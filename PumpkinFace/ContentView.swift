@@ -1,24 +1,132 @@
-//
-//  ContentView.swift
-//  PumpkinFace
-//
-//  Created by Waterback on 11.10.24.
-//
-
 import SwiftUI
+import AVFoundation
+import Vision
 
 struct ContentView: View {
+    @StateObject var cameraViewModel = CameraViewModel()
+
     var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
+        ZStack {
+            CameraView(cameraViewModel: cameraViewModel)
+                .edgesIgnoringSafeArea(.all)
+
+            if let overlayImage = cameraViewModel.overlayImage {
+                Image(uiImage: overlayImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: UIScreen.main.bounds.width, height: UIScreen.main.bounds.height)
+                    .clipped()
+            }
         }
-        .padding()
+        .onAppear {
+            cameraViewModel.startSession()
+        }
+        .onDisappear {
+            cameraViewModel.stopSession()
+        }
     }
 }
 
-#Preview {
-    ContentView()
+class CameraViewModel: NSObject, ObservableObject {
+    public var session = AVCaptureSession()
+    private let videoOutput = AVCaptureVideoDataOutput()
+    private let pumpkinImage = UIImage(named: "pumpkin")! // Add a pumpkin image in your assets
+    
+    @Published var overlayImage: UIImage?
+
+    override init() {
+        super.init()
+        configureSession()
+    }
+
+    private func configureSession() {
+        session.beginConfiguration()
+        
+        guard let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front),
+              let videoDeviceInput = try? AVCaptureDeviceInput(device: videoDevice),
+              session.canAddInput(videoDeviceInput) else { return }
+        
+        session.addInput(videoDeviceInput)
+        
+        if session.canAddOutput(videoOutput) {
+            session.addOutput(videoOutput)
+            videoOutput.setSampleBufferDelegate(self, queue: DispatchQueue(label: "videoQueue"))
+        }
+
+        session.commitConfiguration()
+    }
+
+    func startSession() {
+        if !session.isRunning {
+            session.startRunning()
+        }
+    }
+
+    func stopSession() {
+        if session.isRunning {
+            session.stopRunning()
+        }
+    }
 }
+
+extension CameraViewModel: AVCaptureVideoDataOutputSampleBufferDelegate {
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        let imageRequestHandler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
+        let faceDetectionRequest = VNDetectFaceRectanglesRequest { [weak self] request, error in
+            if let results = request.results as? [VNFaceObservation], let self = self {
+                if let result = results.first {
+                    self.addPumpkinToFace(on: pixelBuffer, faceObservation: result)
+                }
+            }
+        }
+
+        try? imageRequestHandler.perform([faceDetectionRequest])
+    }
+
+    private func addPumpkinToFace(on pixelBuffer: CVPixelBuffer, faceObservation: VNFaceObservation) {
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let context = CIContext()
+
+        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return }
+        let uiImage = UIImage(cgImage: cgImage)
+
+        // Calculate the face frame
+        let boundingBox = faceObservation.boundingBox
+        let faceRect = CGRect(
+            x: boundingBox.origin.x * CGFloat(cgImage.width),
+            y: (1 - boundingBox.origin.y - boundingBox.height) * CGFloat(cgImage.height),
+            width: boundingBox.width * CGFloat(cgImage.width),
+            height: boundingBox.height * CGFloat(cgImage.height)
+        )
+
+        // Draw pumpkin over the face
+        UIGraphicsBeginImageContextWithOptions(uiImage.size, false, 1.0)
+        uiImage.draw(in: CGRect(x: 0, y: 0, width: uiImage.size.width, height: uiImage.size.height))
+        pumpkinImage.draw(in: faceRect)
+
+        let finalImage = UIGraphicsGetImageFromCurrentImageContext()
+        UIGraphicsEndImageContext()
+
+        DispatchQueue.main.async {
+            self.overlayImage = finalImage
+        }
+    }
+}
+
+struct CameraView: UIViewRepresentable {
+    var cameraViewModel: CameraViewModel
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView(frame: UIScreen.main.bounds)
+        let previewLayer = AVCaptureVideoPreviewLayer(session: cameraViewModel.session)
+        previewLayer.videoGravity = .resizeAspectFill
+        previewLayer.frame = view.bounds
+        view.layer.addSublayer(previewLayer)
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {}
+}
+
