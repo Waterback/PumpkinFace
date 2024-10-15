@@ -3,19 +3,22 @@ import AVFoundation
 import Vision
 
 struct ContentView: View {
-    @StateObject var cameraViewModel = CameraViewModel()
-
+    @StateObject private var cameraViewModel = CameraViewModel()
+    
     var body: some View {
         ZStack {
-            CameraView(cameraViewModel: cameraViewModel)
+            // Kameraansicht
+            CameraView(viewModel: cameraViewModel)
                 .edgesIgnoringSafeArea(.all)
-
-            if let overlayImage = cameraViewModel.overlayImage {
-                Image(uiImage: overlayImage)
+            
+            // Zeige Kürbisbilder auf erkannten Gesichtern
+            ForEach(cameraViewModel.faces, id: \.self) { face in
+                Image("pumpkin")
                     .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: UIScreen.main.bounds.width, height: UIScreen.main.bounds.height)
-                    .clipped()
+                    .frame(width: face.width * UIScreen.main.bounds.width + 100,
+                           height: face.height * UIScreen.main.bounds.height + 100)
+                    .position(x: face.x * UIScreen.main.bounds.width + (face.width * UIScreen.main.bounds.width / 2),
+                              y: (1 - face.y - 0.1) * UIScreen.main.bounds.height - (face.height * UIScreen.main.bounds.height / 2))
             }
         }
         .onAppear {
@@ -27,110 +30,88 @@ struct ContentView: View {
     }
 }
 
+struct FaceData: Hashable {
+    let x: CGFloat
+    let y: CGFloat
+    let width: CGFloat
+    let height: CGFloat
+}
+
 class CameraViewModel: NSObject, ObservableObject {
-    public var session = AVCaptureSession()
-    private let videoOutput = AVCaptureVideoDataOutput()
-    private let pumpkinImage = UIImage(named: "pumpkin")! // Add a pumpkin image in your assets
+    @Published var faces: [FaceData] = []
     
-    @Published var overlayImage: UIImage?
-
-    override init() {
-        super.init()
-        configureSession()
+    public let session = AVCaptureSession()
+    private var videoOutput = AVCaptureVideoDataOutput()
+    
+    func startSession() {
+        setupCamera()
+        session.startRunning()
     }
-
-    private func configureSession() {
+    
+    func stopSession() {
+        session.stopRunning()
+    }
+    
+    private func setupCamera() {
+        guard let videoCaptureDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front),
+              let videoInput = try? AVCaptureDeviceInput(device: videoCaptureDevice) else { return }
+        
         session.beginConfiguration()
+        session.sessionPreset = .high
         
-        // Ändere die Kamera auf die Rückseitenkamera
-        guard let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
-              let videoDeviceInput = try? AVCaptureDeviceInput(device: videoDevice),
-              session.canAddInput(videoDeviceInput) else { return }
+        if session.canAddInput(videoInput) {
+            session.addInput(videoInput)
+        }
         
-        session.addInput(videoDeviceInput)
-        
+        videoOutput.setSampleBufferDelegate(self, queue: DispatchQueue(label: "videoQueue"))
         if session.canAddOutput(videoOutput) {
             session.addOutput(videoOutput)
-            videoOutput.setSampleBufferDelegate(self, queue: DispatchQueue(label: "videoQueue"))
         }
-
+        
+        if let connection = videoOutput.connection(with: .video) {
+            connection.videoOrientation = .portrait // Ignoriere die Geräteausrichtung
+        }
+        
         session.commitConfiguration()
-    }
-
-    func startSession() {
-        if !session.isRunning {
-            session.startRunning()
-        }
-    }
-
-    func stopSession() {
-        if session.isRunning {
-            session.stopRunning()
-        }
     }
 }
 
 extension CameraViewModel: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-
-        let imageRequestHandler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
-        let faceDetectionRequest = VNDetectFaceRectanglesRequest { [weak self] request, error in
-            if let results = request.results as? [VNFaceObservation], let self = self {
-                if let result = results.first {
-                    self.addPumpkinToFace(on: pixelBuffer, faceObservation: result)
+        
+        let request = VNDetectFaceRectanglesRequest { [weak self] request, _ in
+            guard let results = request.results as? [VNFaceObservation] else { return }
+            
+            DispatchQueue.main.async {
+                self?.faces = results.map { face in
+                    return FaceData(
+                        x: face.boundingBox.origin.x,
+                        y: face.boundingBox.origin.y,
+                        width: face.boundingBox.size.width,
+                        height: face.boundingBox.size.height
+                    )
                 }
             }
         }
-
-        try? imageRequestHandler.perform([faceDetectionRequest])
-    }
-
-    private func addPumpkinToFace(on pixelBuffer: CVPixelBuffer, faceObservation: VNFaceObservation) {
-        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        let context = CIContext()
-
-        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return }
-        let uiImage = UIImage(cgImage: cgImage)
-
-        // Bildrotation korrigieren
-        let rotatedImage = UIImage(cgImage: cgImage, scale: uiImage.scale, orientation: .right)
-
-        // Berechne das Gesichtsfeld
-        let boundingBox = faceObservation.boundingBox
-        let faceRect = CGRect(
-            x: boundingBox.origin.x * CGFloat(cgImage.width),
-            y: (1 - boundingBox.origin.y - boundingBox.height) * CGFloat(cgImage.height),
-            width: boundingBox.width * CGFloat(cgImage.width),
-            height: boundingBox.height * CGFloat(cgImage.height)
-        )
-
-        // Kürbis auf das Gesicht legen
-        UIGraphicsBeginImageContextWithOptions(rotatedImage.size, false, 1.0)
-        rotatedImage.draw(in: CGRect(x: 0, y: 0, width: rotatedImage.size.width, height: rotatedImage.size.height))
-        pumpkinImage.draw(in: faceRect)
-
-        let finalImage = UIGraphicsGetImageFromCurrentImageContext()
-        UIGraphicsEndImageContext()
-
-        DispatchQueue.main.async {
-            self.overlayImage = finalImage
-        }
+        
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
+        try? handler.perform([request])
     }
 }
 
 struct CameraView: UIViewRepresentable {
-    var cameraViewModel: CameraViewModel
-
+    let viewModel: CameraViewModel
+    
     func makeUIView(context: Context) -> UIView {
         let view = UIView(frame: UIScreen.main.bounds)
-        let previewLayer = AVCaptureVideoPreviewLayer(session: cameraViewModel.session)
-        previewLayer.videoGravity = .resizeAspectFill
+        let previewLayer = AVCaptureVideoPreviewLayer(session: viewModel.session)
         previewLayer.frame = view.bounds
+        previewLayer.videoGravity = .resizeAspectFill
         view.layer.addSublayer(previewLayer)
         return view
     }
-
-    func updateUIView(_ uiView: UIView, context: Context) {}
+    
+    func updateUIView(_ uiView: UIView, context: Context) { }
 }
 
